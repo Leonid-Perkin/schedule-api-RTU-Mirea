@@ -1,3 +1,5 @@
 fastapi
 uvicorn
 playwright
+pydantic-settings
+python-dotenv

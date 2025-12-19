@@ -1,0 +1,13 @@
+services:
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./schedule_cache:/app/schedule_cache
+    environment:
+      - APP_TITLE=Schedule API RTU MIREA
+      - BROWSER_HEADLESS=True
+      - CACHE_TTL=86400
+      - TZ=Europe/Moscow
+    restart: always

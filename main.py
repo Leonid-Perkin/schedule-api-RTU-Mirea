@@ -3,16 +3,60 @@ import os
 import json
 import time
 import re
+from contextlib import asynccontextmanager
 from urllib.parse import quote
-from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
+from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError, Browser
 
 from fastapi import FastAPI, HTTPException, Query
 from datetime import datetime, timedelta
 
-app = FastAPI(title="Schedule API RTU MIREA")
+from config import settings
+from logger import setup_logging, logger
 
-CACHE_DIR = "schedule_cache"
-CACHE_TTL = 86400
+setup_logging()
+
+class PlaywrightManager:
+    def __init__(self):
+        self.playwright = None
+        self.browser = None
+
+    async def start(self):
+        self.playwright = await async_playwright().start()
+        self.browser = await self.playwright.chromium.launch(
+            headless=settings.BROWSER_HEADLESS,
+            args=['--disable-blink-features=AutomationControlled']
+        )
+        logger.info("Браузер Playwright успешно запущен")
+
+    async def stop(self):
+        if self.browser:
+            await self.browser.close()
+        if self.playwright:
+            await self.playwright.stop()
+        logger.info("Браузер Playwright остановлен")
+
+    async def get_new_page(self):
+        if not self.browser:
+            await self.start()
+        context = await self.browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+            viewport={"width": 1920, "height": 1080},
+            device_scale_factor=1,
+        )
+        return await context.new_page()
+
+pw_manager = PlaywrightManager()
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await pw_manager.start()
+    yield
+    await pw_manager.stop()
+
+app = FastAPI(title=settings.APP_TITLE, lifespan=lifespan)
+
+CACHE_DIR = settings.CACHE_DIR
+CACHE_TTL = settings.CACHE_TTL
 
 def is_cache_valid(cache_filename: str) -> bool:
     if not os.path.exists(cache_filename):
@@ -41,7 +85,7 @@ def save_to_cache(group: str, date: str, schedule: list):
         with open(cache_filename, "w", encoding="utf-8") as f:
             json.dump(schedule, f, ensure_ascii=False, indent=2)
     except IOError as e:
-        print(f"Ошибка сохранения кэша: {e}")
+        logger.error(f"Ошибка сохранения кэша: {e}")
 
 
 def parse_time_to_minutes(time_str: str) -> int:
@@ -56,26 +100,22 @@ async def get_day_schedule(group: str, date: str) -> list:
     cached_schedule = load_from_cache(group, date)
     if cached_schedule is not None:
         return cached_schedule
+    
     encoded_group = quote(group)
     url = f"https://schedule-of.mirea.ru/?scheduleTitle={encoded_group}&date={date}"
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True, args=['--disable-blink-features=AutomationControlled'])
-        context = await browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-            viewport={"width": 1920, "height": 1080},
-            device_scale_factor=1,
-        )
-        page = await context.new_page()
+    
+    page = await pw_manager.get_new_page()
+    try:
         try:
-            await page.goto(url, wait_until="networkidle", timeout=60000)
+            await page.goto(url, wait_until="networkidle", timeout=settings.PLAYWRIGHT_TIMEOUT)
             await page.wait_for_load_state("domcontentloaded")
             await asyncio.sleep(1)
             await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
             await asyncio.sleep(0.5)
             schedule_blocks = await page.query_selector_all('div.TimeLine_fullcalendarText__fm4tW')
             if not schedule_blocks:
-                await browser.close()
                 return []
+            
             schedule = []
             period = "Не указан"
             for block in schedule_blocks:
@@ -158,15 +198,15 @@ async def get_day_schedule(group: str, date: str) -> list:
                 })
 
             schedule.sort(key=lambda x: parse_time_to_minutes(x["time"]))
+            save_to_cache(group, date, schedule)
+            return schedule
 
         except Exception as e:
-            print(f"Ошибка при парсинге {group} на {date}: {e}")
-            schedule = []
-        finally:
-            await browser.close()
-
-    save_to_cache(group, date, schedule)
-    return schedule
+            logger.error(f"Ошибка при парсинге {group} на {date}: {e}")
+            return []
+    finally:
+        await page.close()
+        await page.context.close()
 GROUP_REGEX = re.compile(r"^[А-Я]{4}-\d{2}-\d{2}$")
 
 def validate_group(group: str):
@@ -241,4 +281,4 @@ async def get_weekly_schedule(
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run("main:app", host=settings.HOST, port=settings.PORT, reload=settings.DEBUG)
