@@ -6,6 +6,11 @@ import re
 from urllib.parse import quote
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
 
+from fastapi import FastAPI, HTTPException, Query
+from datetime import datetime
+
+app = FastAPI(title="Schedule API RTU MIREA")
+
 CACHE_DIR = "schedule_cache"
 CACHE_TTL = 86400
 
@@ -156,30 +161,29 @@ async def get_day_schedule(group: str, date: str) -> list:
     return schedule
 
 
-from datetime import datetime
+@app.get("/schedule")
+async def get_schedule(
+    group: str = Query(..., description="Название группы, например БАСО-03-24"),
+    date: str = Query(None, description="Дата в формате ГГГГ-ММ-ДД. По умолчанию сегодня.")
+):
+    if not date:
+        date = datetime.now().strftime("%Y-%m-%d")
+    
+    try:
+        # Валидация формата даты
+        datetime.strptime(date, "%Y-%m-%d")
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Неверный формат даты. Используйте ГГГГ-ММ-ДД.")
 
-
-async def main():
-    group_name = "БАСО-03-24"
-    today_date = datetime.now().strftime("%Y-%m-%d")
-
-    print(f"--- Загрузка расписания для {group_name} на {today_date} ---")
-
-    schedule = await get_day_schedule(group_name, today_date)
-
-    if not schedule:
-        print("Пар не найдено или произошла ошибка парсинга.")
-        return
-
-    for i, item in enumerate(schedule, 1):
-        print(f"\nПара №{i}")
-        print(f"⏰ Время: {item['time']}")
-        print(f"📖 Тип: {item['type']}")
-        print(f"📚 Предмет: {item['subject']}")
-        print(f"🏫 Аудитория: {item['room']}")
-        print(f"👨‍🏫 Преподаватель: {item['teacher']}")
-        print(f"👥 Группы: {', '.join(item['groups'])}")
+    schedule = await get_day_schedule(group, date)
+    
+    return {
+        "group": group,
+        "date": date,
+        "schedule": schedule
+    }
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
