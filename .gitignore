@@ -5,7 +5,7 @@ __pycache__/
 .idea
 # C extensions
 *.so
-
+schedule_cache/
 # Distribution / packaging
 .Python
 build/
