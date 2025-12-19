@@ -7,7 +7,7 @@ from urllib.parse import quote
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
 
 from fastapi import FastAPI, HTTPException, Query
-from datetime import datetime
+from datetime import datetime, timedelta
 
 app = FastAPI(title="Schedule API RTU MIREA")
 
@@ -181,6 +181,44 @@ async def get_schedule(
         "group": group,
         "date": date,
         "schedule": schedule
+    }
+
+
+@app.get("/schedule/week")
+async def get_weekly_schedule(
+    group: str = Query(..., description="Название группы, например БАСО-03-24"),
+    date: str = Query(None, description="Дата в рамках недели в формате ГГГГ-ММ-ДД. По умолчанию сегодня.")
+):
+    if not date:
+        date_dt = datetime.now()
+    else:
+        try:
+            date_dt = datetime.strptime(date, "%Y-%m-%d")
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Неверный формат даты. Используйте ГГГГ-ММ-ДД.")
+
+    # Находим понедельник текущей недели
+    monday = date_dt - timedelta(days=date_dt.weekday())
+    
+    # Генерируем даты для всей недели
+    week_dates = [(monday + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(7)]
+    
+    # Собираем расписание для каждого дня
+    # Используем asyncio.gather для параллельного получения данных
+    tasks = [get_day_schedule(group, d) for d in week_dates]
+    results = await asyncio.gather(*tasks)
+    
+    weekly_schedule = []
+    for d, s in zip(week_dates, results):
+        weekly_schedule.append({
+            "date": d,
+            "schedule": s
+        })
+
+    return {
+        "group": group,
+        "week_start": monday.strftime("%Y-%m-%d"),
+        "schedules": weekly_schedule
     }
 
 
