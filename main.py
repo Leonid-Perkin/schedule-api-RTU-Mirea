@@ -21,19 +21,27 @@ def is_cache_valid(cache_filename: str) -> bool:
 
 
 def load_from_cache(group: str, date: str) -> dict | None:
-    cache_filename = os.path.join(CACHE_DIR, f"{group}_{date}.json")
+    safe_group = re.sub(r'[^A-Za-z0-9-А-Яа-яёЁ]', '_', group)
+    cache_filename = os.path.join(CACHE_DIR, f"{safe_group}_{date}.json")
     if is_cache_valid(cache_filename):
-        with open(cache_filename, "r", encoding="utf-8") as f:
-            return json.load(f)
+        try:
+            with open(cache_filename, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except (json.JSONDecodeError, IOError):
+            return None
     return None
 
 
 def save_to_cache(group: str, date: str, schedule: list):
     if not os.path.exists(CACHE_DIR):
         os.makedirs(CACHE_DIR)
-    cache_filename = os.path.join(CACHE_DIR, f"{group}_{date}.json")
-    with open(cache_filename, "w", encoding="utf-8") as f:
-        json.dump(schedule, f, ensure_ascii=False, indent=2)
+    safe_group = re.sub(r'[^A-Za-z0-9-А-Яа-яёЁ]', '_', group)
+    cache_filename = os.path.join(CACHE_DIR, f"{safe_group}_{date}.json")
+    try:
+        with open(cache_filename, "w", encoding="utf-8") as f:
+            json.dump(schedule, f, ensure_ascii=False, indent=2)
+    except IOError as e:
+        print(f"Ошибка сохранения кэша: {e}")
 
 
 def parse_time_to_minutes(time_str: str) -> int:
@@ -152,28 +160,46 @@ async def get_day_schedule(group: str, date: str) -> list:
             schedule.sort(key=lambda x: parse_time_to_minutes(x["time"]))
 
         except Exception as e:
-            print(f"Ошибка при парсинге: {e}")
+            print(f"Ошибка при парсинге {group} на {date}: {e}")
             schedule = []
         finally:
             await browser.close()
 
     save_to_cache(group, date, schedule)
     return schedule
+GROUP_REGEX = re.compile(r"^[А-Я]{4}-\d{2}-\d{2}$")
 
+def validate_group(group: str):
+    if not GROUP_REGEX.match(group):
+        if not (3 <= len(group) <= 15 and re.match(r"^[А-ЯЁа-яёA-Za-z0-9-]+$", group)):
+            raise HTTPException(
+                status_code=400, 
+                detail="Неверный формат группы. Пример корректного формата: БАСО-03-24."
+            )
+def validate_date_range(date_str: str):
+    try:
+        dt = datetime.strptime(date_str, "%Y-%m-%d")
+        now = datetime.now()
+        if dt < now - timedelta(days=365*2) or dt > now + timedelta(days=365*2):
+            raise HTTPException(
+                status_code=400, 
+                detail="Дата вне допустимого диапазона (должна быть в пределах 2 лет от текущей даты)."
+            )
+        return dt
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Неверный формат даты. Используйте ГГГГ-ММ-ДД.")
 
 @app.get("/schedule")
 async def get_schedule(
     group: str = Query(..., description="Название группы, например БАСО-03-24"),
     date: str = Query(None, description="Дата в формате ГГГГ-ММ-ДД. По умолчанию сегодня.")
 ):
+    validate_group(group)
+    
     if not date:
         date = datetime.now().strftime("%Y-%m-%d")
-    
-    try:
-        # Валидация формата даты
-        datetime.strptime(date, "%Y-%m-%d")
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Неверный формат даты. Используйте ГГГГ-ММ-ДД.")
+    else:
+        validate_date_range(date)
 
     schedule = await get_day_schedule(group, date)
     
@@ -189,22 +215,13 @@ async def get_weekly_schedule(
     group: str = Query(..., description="Название группы, например БАСО-03-24"),
     date: str = Query(None, description="Дата в рамках недели в формате ГГГГ-ММ-ДД. По умолчанию сегодня.")
 ):
+    validate_group(group)
     if not date:
         date_dt = datetime.now()
     else:
-        try:
-            date_dt = datetime.strptime(date, "%Y-%m-%d")
-        except ValueError:
-            raise HTTPException(status_code=400, detail="Неверный формат даты. Используйте ГГГГ-ММ-ДД.")
-
-    # Находим понедельник текущей недели
+        date_dt = validate_date_range(date)
     monday = date_dt - timedelta(days=date_dt.weekday())
-    
-    # Генерируем даты для всей недели
     week_dates = [(monday + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(7)]
-    
-    # Собираем расписание для каждого дня
-    # Используем asyncio.gather для параллельного получения данных
     tasks = [get_day_schedule(group, d) for d in week_dates]
     results = await asyncio.gather(*tasks)
     
