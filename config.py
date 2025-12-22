@@ -6,6 +6,7 @@ class Settings(BaseSettings):
     HOST: str = "0.0.0.0"
     PORT: int = 8000
     DEBUG: bool = False
+    TZ: str = "Europe/Moscow"
 
     CACHE_DIR: Path = Path("schedule_cache")
     CACHE_TTL: int = 86400  # 24 hours
